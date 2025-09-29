@@ -1,0 +1,351 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'todo-app-backend
+
+  SAM template for a serverless To-Do application backend. Frontend comes soon.
+
+  '
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 30
+    MemorySize: 128
+    Environment:
+      Variables:
+        TABLE_NAME:
+          Ref: TodoAppTable
+        GSI_NAME: GSI1
+Resources:
+  TodoAppTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TodoAppTable
+      AttributeDefinitions:
+      - AttributeName: PK
+        AttributeType: S
+      - AttributeName: SK
+        AttributeType: S
+      - AttributeName: GSI1PK
+        AttributeType: S
+      - AttributeName: GSI1SK
+        AttributeType: S
+      KeySchema:
+      - AttributeName: PK
+        KeyType: HASH
+      - AttributeName: SK
+        KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      GlobalSecondaryIndexes:
+      - IndexName: GSI1
+        KeySchema:
+        - AttributeName: GSI1PK
+          KeyType: HASH
+        - AttributeName: GSI1SK
+          KeyType: RANGE
+        Projection:
+          ProjectionType: ALL
+    Metadata:
+      SamResourceId: TodoAppTable
+  TodoApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: TodoAppApi
+      StageName: Prod
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn:
+              Fn::GetAtt:
+              - CognitoUserPool
+              - Arn
+    Metadata:
+      SamResourceId: TodoApi
+  CreateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-i5ggdr7mfill/todo-backend/9d7cddfdedb9413e879b6431f03eef3d
+      Handler: create_task.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: POST
+            RestApiId:
+              Ref: TodoApi
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TodoAppTable
+    Metadata:
+      SamResourceId: CreateTaskFunction
+  GetTasksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-i5ggdr7mfill/todo-backend/9d7cddfdedb9413e879b6431f03eef3d
+      Handler: get_tasks.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: GET
+            RestApiId:
+              Ref: TodoApi
+      Policies:
+      - DynamoDBReadPolicy:
+          TableName:
+            Ref: TodoAppTable
+    Metadata:
+      SamResourceId: GetTasksFunction
+  UpdateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-i5ggdr7mfill/todo-backend/9d7cddfdedb9413e879b6431f03eef3d
+      Handler: update_task.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /tasks/{taskId}
+            Method: PUT
+            RestApiId:
+              Ref: TodoApi
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TodoAppTable
+    Metadata:
+      SamResourceId: UpdateTaskFunction
+  DeleteTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-i5ggdr7mfill/todo-backend/9d7cddfdedb9413e879b6431f03eef3d
+      Handler: delete_task.handler
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /tasks/{taskId}
+            Method: DELETE
+            RestApiId:
+              Ref: TodoApi
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TodoAppTable
+    Metadata:
+      SamResourceId: DeleteTaskFunction
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: TodoAppUserPool
+      AutoVerifiedAttributes:
+      - email
+      LambdaConfig:
+        PostAuthentication:
+          Fn::GetAtt:
+          - PostAuthFunction
+          - Arn
+    Metadata:
+      SamResourceId: CognitoUserPool
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId:
+        Ref: CognitoUserPool
+      ExplicitAuthFlows:
+      - ADMIN_NO_SRP_AUTH
+    Metadata:
+      SamResourceId: CognitoUserPoolClient
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain:
+        Fn::Sub: todo-app-${AWS::StackName}
+      UserPoolId:
+        Ref: CognitoUserPool
+    Metadata:
+      SamResourceId: CognitoUserPoolDomain
+  PostAuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-i5ggdr7mfill/todo-backend/9d7cddfdedb9413e879b6431f03eef3d
+      Handler: post_auth.handler
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN:
+            Ref: UserNotificationsTopic
+      Policies:
+      - Statement:
+          Effect: Allow
+          Action:
+          - sns:Subscribe
+          - sns:ListSubscriptionsByTopic
+          - sns:Unsubscribe
+          Resource:
+            Ref: UserNotificationsTopic
+    Metadata:
+      SamResourceId: PostAuthFunction
+  PostAuthFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName:
+        Fn::GetAtt:
+        - PostAuthFunction
+        - Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - CognitoUserPool
+        - Arn
+    Metadata:
+      SamResourceId: PostAuthFunctionInvokePermission
+  UserNotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName:
+        Fn::Sub: todo-app-notifications-${AWS::StackName}
+    Metadata:
+      SamResourceId: UserNotificationsTopic
+  StreamRouterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: stream_router.handler
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-i5ggdr7mfill/todo-backend/25c8a9efe429a9ca453cfb2b5ff76469
+      Environment:
+        Variables:
+          SQS_QUEUE_URL:
+            Fn::GetAtt:
+            - TaskExpiryQueue
+            - QueueUrl
+      Policies:
+      - SQSSendMessagePolicy:
+          QueueName:
+            Fn::GetAtt:
+            - TaskExpiryQueue
+            - QueueName
+      Events:
+        DynamoDBStream:
+          Type: DynamoDB
+          Properties:
+            Stream:
+              Fn::GetAtt:
+              - TodoAppTable
+              - StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 10
+            FilterCriteria:
+              Filters:
+              - Pattern: '{"eventName": ["INSERT", "MODIFY", "REMOVE"]}'
+    Metadata:
+      SamResourceId: StreamRouterFunction
+  DynamoDBStreamProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: process_stream.handler
+      CodeUri: s3://aws-sam-cli-managed-default-samclisourcebucket-i5ggdr7mfill/todo-backend/6429c11fbd9b43f9fb39da3d3be323ce
+      Environment:
+        Variables:
+          TABLE_NAME:
+            Ref: TodoAppTable
+          SQS_QUEUE_URL:
+            Fn::GetAtt:
+            - TaskExpiryQueue
+            - QueueUrl
+      Events:
+        TaskQueueTrigger:
+          Type: SQS
+          Properties:
+            Queue:
+              Fn::GetAtt:
+              - TaskExpiryQueue
+              - Arn
+            BatchSize: 10
+            Enabled: true
+      Policies:
+      - DynamoDBCrudPolicy:
+          TableName:
+            Ref: TodoAppTable
+      - SNSPublishMessagePolicy:
+          TopicName:
+            Fn::GetAtt:
+            - UserNotificationsTopic
+            - TopicName
+      - SQSPollerPolicy:
+          QueueName:
+            Fn::GetAtt:
+            - TaskExpiryQueue
+            - QueueName
+      - Statement:
+        - Effect: Allow
+          Action:
+          - events:PutRule
+          - events:DeleteRule
+          Resource:
+            Fn::Sub: arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/TodoApp*
+      - Statement:
+        - Effect: Allow
+          Action:
+          - dynamodb:GetRecords
+          - dynamodb:GetShardIterator
+          - dynamodb:DescribeStream
+          - dynamodb:ListStreams
+          Resource:
+            Fn::GetAtt:
+            - TodoAppTable
+            - StreamArn
+    Metadata:
+      SamResourceId: DynamoDBStreamProcessorFunction
+  TaskExpiryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      ContentBasedDeduplication: true
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 300
+      QueueName:
+        Fn::Sub: todo-app-expiry-queue-${AWS::StackName}.fifo
+    Metadata:
+      SamResourceId: TaskExpiryQueue
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL for all CRUD operations
+    Value:
+      Fn::Sub: https://${TodoApi}.execute-api.${AWS::Region}.amazonaws.com/Prod
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-ApiUrl
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value:
+      Ref: CognitoUserPool
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-UserPoolId
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID (Web Client)
+    Value:
+      Ref: CognitoUserPoolClient
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-UserPoolClientId
+  Region:
+    Description: AWS Region of the deployed stack
+    Value:
+      Ref: AWS::Region
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-Region
+  SNSTopicArn:
+    Description: The ARN of the SNS Topic for user notifications
+    Value:
+      Ref: UserNotificationsTopic
+    Export:
+      Name:
+        Fn::Sub: ${AWS::StackName}-SNSTopicArn

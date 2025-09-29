@@ -1,0 +1,467 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  todo-app-backend
+
+  SAM template for a serverless To-Do application backend.
+
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 30
+    MemorySize: 128
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref TodoAppTable
+        GSI_NAME: GSI1
+
+Resources:
+# ----------------------------------------------------------------
+# CORE DATABASE: DynamoDB Table
+# ----------------------------------------------------------------
+  TodoAppTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TodoAppTable
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+# ----------------------------------------------------------------
+# AUTHENTICATION: Cognito User Pool and Domain
+# ----------------------------------------------------------------
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: TodoAppUserPool
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: false
+    # Ensure these properties are set:
+      # UsernameConfiguration:
+      #   CaseSensitive: false
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Mutable: true
+          Required: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: false
+          RequireNumbers: false
+          RequireSymbols: false
+          RequireUppercase: false
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostAuthFunction.Arn
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: TodoAppWebClient
+      UserPoolId: !Ref CognitoUserPool
+      ExplicitAuthFlows:
+        - ADMIN_NO_SRP_AUTH
+      GenerateSecret: false
+      SupportedIdentityProviders:
+        - COGNITO
+      CallbackURLs:
+        - http://localhost:5173
+      LogoutURLs:
+        - http://localhost:5173
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows:
+        - code
+
+  CognitoUserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: todo-app-todo-backend
+      UserPoolId: !Ref CognitoUserPool
+
+# ----------------------------------------------------------------
+# NOTIFICATION: SNS Topic & SQS FIFO Queue
+# ----------------------------------------------------------------
+  UserNotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub todo-app-notifications-${AWS::StackName}
+
+  TaskExpiryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      ContentBasedDeduplication: true
+      FifoQueue: true
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 300
+      QueueName: !Sub todo-app-expiry-queue-${AWS::StackName}.fifo
+
+# ----------------------------------------------------------------
+# LAMBDA FUNCTIONS WITH PROPER API INTEGRATION
+# ----------------------------------------------------------------
+  PostAuthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: post_auth.py
+      Handler: post_auth.handler
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref UserNotificationsTopic
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - sns:Subscribe
+              - sns:ListSubscriptionsByTopic
+              - sns:Unsubscribe
+            Resource: !Ref UserNotificationsTopic
+        - Statement:
+            Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref UserNotificationsTopic
+
+  PostAuthFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PostAuthFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt CognitoUserPool.Arn
+
+  CreateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: create_task.py
+      Handler: create_task.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TodoAppTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TodoAppTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: POST
+            RestApiId: !Ref TodoApi
+
+  GetTasksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: get_tasks.py
+      Handler: get_tasks.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TodoAppTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TodoAppTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: GET
+            RestApiId: !Ref TodoApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  UpdateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: update_task.py
+      Handler: update_task.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TodoAppTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TodoAppTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /tasks/{taskId}
+            Method: PUT
+            RestApiId: !Ref TodoApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  DeleteTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: delete_task.py
+      Handler: delete_task.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TodoAppTable
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TodoAppTable
+      Events:
+        Api:
+          Type: Api
+          Properties:
+            Path: /tasks/{taskId}
+            Method: DELETE
+            RestApiId: !Ref TodoApi
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+# ----------------------------------------------------------------
+# STREAM PROCESSING FUNCTIONS
+# ----------------------------------------------------------------
+  StreamRouterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: stream_router.py
+      Handler: stream_router.handler
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref TaskExpiryQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt TaskExpiryQueue.QueueName
+      Events:
+        DynamoDBStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt TodoAppTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 10
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT", "MODIFY", "REMOVE"]}'
+
+  ProcessStreamFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: process_stream.py
+      Handler: process_stream.handler
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TodoAppTable
+          SQS_QUEUE_URL: !Ref TaskExpiryQueue
+          SNS_TOPIC_ARN: !Ref UserNotificationsTopic
+          EXPIRY_HANDLER_ARN: !GetAtt ExpiryHandlerFunction.Arn # <-- THIS LINE IS MISSING OR TYPO'D
+
+      Events:
+        TaskQueueTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt TaskExpiryQueue.Arn
+            BatchSize: 10
+            Enabled: true
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TodoAppTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt UserNotificationsTopic.TopicName
+        - SQSPollerPolicy:
+            QueueName: !GetAtt TaskExpiryQueue.QueueName
+        - Statement:
+            Effect: Allow
+            Action:
+              - events:PutRule
+              - events:PutTargets
+              - events:RemoveTargets
+              - events:DeleteRule
+              - events:ListRules
+              - events:ListTargetsByRule
+            Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/TodoAppTaskExpiry-*"
+
+  EventBridgeInvokePermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        FunctionName: !GetAtt ExpiryHandlerFunction.Arn
+        Action: lambda:InvokeFunction
+        Principal: events.amazonaws.com
+        # Limits permission to only rules created by ProcessStreamFunction
+        SourceArn: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/TodoAppTaskExpiry-*"
+
+# ----------------------------------------------------------------
+# IDENTITY POOL & ROLES
+# ----------------------------------------------------------------
+  CognitoIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: TodoAppIdentityPool
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+        - ClientId: !Ref CognitoUserPoolClient
+          ProviderName: !GetAtt CognitoUserPool.ProviderName
+
+  CognitoAuthRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: cognito-identity.amazonaws.com
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref CognitoIdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: authenticated
+      Policies:
+        - PolicyName: CognitoAuthorizedPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - execute-api:Invoke
+                Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${TodoApi}/*"
+
+  CognitoIdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref CognitoIdentityPool
+      Roles:
+        authenticated: !GetAtt CognitoAuthRole.Arn
+
+# ----------------------------------------------------------------
+# API GATEWAY (FIXED - With proper CORS)
+# ----------------------------------------------------------------
+  TodoApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+
+# ----------------------------------------------------------------
+# CORS HANDLER FUNCTION (for OPTIONS requests)
+# ----------------------------------------------------------------
+  CorsHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: cors_handler.py
+      Handler: cors_handler.handler
+      Runtime: python3.9
+      MemorySize: 128
+      Timeout: 30
+      Events:
+        OptionsTasks:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: OPTIONS
+            RestApiId: !Ref TodoApi
+            Auth:
+              Authorizer: NONE  # No auth for OPTIONS
+        OptionsTaskId:
+          Type: Api
+          Properties:
+            Path: /tasks/{taskId}
+            Method: OPTIONS
+            RestApiId: !Ref TodoApi
+            Auth:
+              Authorizer: NONE  # No auth for OPTIONS
+
+# ----------------------------------------------------------------
+# TASK EXPIRY HANDLER
+# ----------------------------------------------------------------
+  
+  ExpiryHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: expiry_handler.handler
+      CodeUri: .
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref TodoAppTable
+          SNS_TOPIC_ARN: !Ref UserNotificationsTopic
+      Policies:
+        - DynamoDBWritePolicy:
+            TableName: !Ref TodoAppTable
+        # ✅ FIX FOR SAM ERROR: Explicit IAM Statement for SNS Publish
+        - Statement:
+            Effect: Allow
+            Action: 'sns:Publish'
+            Resource: !Ref UserNotificationsTopic # This is the ARN of your SNS Topic
+
+# ----------------------------------------------------------------
+# OUTPUTS
+# ----------------------------------------------------------------
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL for all CRUD operations"
+    Value: !Sub "https://${TodoApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiUrl"
+
+  UserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref CognitoUserPool
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolId"
+
+  UserPoolClientId:
+    Description: "Cognito User Pool Client ID (Web Client)"
+    Value: !Ref CognitoUserPoolClient
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolClientId"
+
+  IdentityPoolId:
+    Description: "Cognito Identity Pool ID"
+    Value: !Ref CognitoIdentityPool
+    Export:
+      Name: !Sub "${AWS::StackName}-IdentityPoolId"
+
+  Region:
+    Description: "AWS Region of the deployed stack"
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub "${AWS::StackName}-Region"
+
+  SNSTopicArn:
+    Description: "The ARN of the SNS Topic for user notifications"
+    Value: !Ref UserNotificationsTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-SNSTopicArn"
