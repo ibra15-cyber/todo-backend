@@ -12,6 +12,10 @@ A robust, scalable AWS serverless backend for a modern todo application. Built w
 - **🌐 RESTful API** - Fully documented endpoints with CORS support
 - **📊 Real-time Updates** - Stream processing for immediate task status changes
 
+## Deployed site
+
+https://master.d10q2ksftgmuou.amplifyapp.com/
+
 ## 🏗️ Architecture
 
 ![Architecture Diagram](https://via.placeholder.com/800x400/667eea/ffffff?text=Serverless+Todo+Backend+Architecture)
