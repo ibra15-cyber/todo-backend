@@ -1,0 +1,147 @@
+graph TB
+    %% Styling
+    classDef frontend fill:#3b82f6,stroke:#1e40af,color:#fff,stroke-width:2px
+    classDef auth fill:#8b5cf6,stroke:#6d28d9,color:#fff,stroke-width:2px
+    classDef api fill:#10b981,stroke:#059669,color:#fff,stroke-width:2px
+    classDef lambda fill:#f59e0b,stroke:#d97706,color:#fff,stroke-width:2px
+    classDef storage fill:#ef4444,stroke:#dc2626,color:#fff,stroke-width:2px
+    classDef messaging fill:#ec4899,stroke:#db2777,color:#fff,stroke-width:2px
+    classDef streaming fill:#06b6d4,stroke:#0891b2,color:#fff,stroke-width:2px
+    classDef scheduler fill:#14b8a6,stroke:#0d9488,color:#fff,stroke-width:2px
+    
+    %% User Interface Layer
+    User([👤 User]):::frontend
+    ReactApp[🖥️ React App<br/>Amplify UI]:::frontend
+    
+    %% Authentication Layer
+    Cognito[🔐 Cognito User Pool<br/>Authentication]:::auth
+    IdentityPool[🎫 Identity Pool<br/>Federated Identity]:::auth
+    PostAuth[📧 PostAuth Lambda<br/>Auto-Subscribe SNS]:::lambda
+    
+    %% API Gateway Layer
+    APIGateway[🚪 API Gateway<br/>REST API + CORS]:::api
+    
+    %% Lambda Functions - CRUD Operations
+    CreateTask[➕ Create Task<br/>Lambda]:::lambda
+    GetTasks[📋 Get Tasks<br/>Lambda]:::lambda
+    UpdateTask[✏️ Update Task<br/>Lambda]:::lambda
+    DeleteTask[🗑️ Delete Task<br/>Lambda]:::lambda
+    
+    %% Database Layer
+    DynamoDB[(🗄️ DynamoDB<br/>TodoAppTable<br/>PK: USER#id<br/>SK: TASK#id)]:::storage
+    DDBStream[📊 DynamoDB Streams<br/>Change Data Capture]:::streaming
+    
+    %% Stream Processing Pipeline
+    StreamRouter[🔀 Stream Router<br/>Lambda]:::lambda
+    SQSQueue[📨 SQS FIFO Queue<br/>Ordered Processing]:::messaging
+    ProcessStream[⚙️ Process Stream<br/>Lambda]:::lambda
+    
+    %% Event Scheduling
+    EventBridge[⏰ EventBridge Rules<br/>Cron Schedules]:::scheduler
+    ExpiryHandler[⏳ Expiry Handler<br/>Lambda]:::lambda
+    
+    %% Notification Layer
+    SNSTopic[📬 SNS Topic<br/>User Notifications]:::messaging
+    Email[📧 Email<br/>Notifications]:::messaging
+    
+    %% User Flow
+    User -->|1. Access App| ReactApp
+    ReactApp -->|2. Sign In/Up| Cognito
+    Cognito -->|3. Trigger| PostAuth
+    PostAuth -->|4. Subscribe Email| SNSTopic
+    Cognito -->|5. Auth Token| ReactApp
+    ReactApp -->|6. Get Credentials| IdentityPool
+    
+    %% API Operations Flow
+    ReactApp -->|7. CRUD Operations<br/>Bearer Token| APIGateway
+    APIGateway -->|Authorize| Cognito
+    
+    APIGateway -->|POST /tasks| CreateTask
+    APIGateway -->|GET /tasks| GetTasks
+    APIGateway -->|PUT /tasks/:id| UpdateTask
+    APIGateway -->|DELETE /tasks/:id| DeleteTask
+    
+    %% Database Operations
+    CreateTask -->|Write| DynamoDB
+    GetTasks -->|Query| DynamoDB
+    UpdateTask -->|Update| DynamoDB
+    DeleteTask -->|Delete| DynamoDB
+    
+    %% Stream Processing Pipeline
+    DynamoDB -->|8. Stream Events<br/>INSERT/MODIFY/REMOVE| DDBStream
+    DDBStream -->|9. Trigger| StreamRouter
+    StreamRouter -->|10. Route to Queue<br/>Deduplicated| SQSQueue
+    SQSQueue -->|11. Batch Process| ProcessStream
+    
+    %% Event Scheduling Logic
+    ProcessStream -->|12a. INSERT Pending Task<br/>Schedule Expiry| EventBridge
+    ProcessStream -->|12b. MODIFY Status<br/>Cancel Schedule| EventBridge
+    ProcessStream -->|12c. DELETE Task<br/>Cancel Schedule| EventBridge
+    ProcessStream -->|12d. Update Deadline<br/>Reschedule| EventBridge
+    
+    %% Expiry Flow
+    EventBridge -->|13. At Deadline Time<br/>Cron Trigger| ExpiryHandler
+    ExpiryHandler -->|14. Check Status<br/>Update to Expired| DynamoDB
+    ExpiryHandler -->|15. Send Notification| SNSTopic
+    
+    %% Notification Delivery
+    SNSTopic -->|16. Deliver| Email
+    Email -->|17. Alert User| User
+    
+    %% Response Flow
+    DynamoDB -->|Response| GetTasks
+    DynamoDB -->|Response| CreateTask
+    DynamoDB -->|Response| UpdateTask
+    DynamoDB -->|Response| DeleteTask
+    
+    GetTasks -->|Response| APIGateway
+    CreateTask -->|Response| APIGateway
+    UpdateTask -->|Response| APIGateway
+    DeleteTask -->|Response| APIGateway
+    
+    APIGateway -->|18. Return Data| ReactApp
+    ReactApp -->|19. Display UI| User
+    
+    %% Key Features Annotations
+    subgraph "📱 Frontend Layer"
+        ReactApp
+        User
+    end
+    
+    subgraph "🔒 Security & Auth"
+        Cognito
+        IdentityPool
+        PostAuth
+    end
+    
+    subgraph "🔌 API Layer"
+        APIGateway
+    end
+    
+    subgraph "⚡ Business Logic"
+        CreateTask
+        GetTasks
+        UpdateTask
+        DeleteTask
+    end
+    
+    subgraph "💾 Data Persistence"
+        DynamoDB
+        DDBStream
+    end
+    
+    subgraph "🔄 Stream Processing Pipeline"
+        StreamRouter
+        SQSQueue
+        ProcessStream
+    end
+    
+    subgraph "⏲️ Task Expiry System"
+        EventBridge
+        ExpiryHandler
+    end
+    
+    subgraph "📢 Notifications"
+        SNSTopic
+        Email
+    end
